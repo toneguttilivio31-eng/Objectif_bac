@@ -1,7 +1,6 @@
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
-const DEFAULT_MODEL = 'openrouter/free';
+const DEFAULT_MODEL = 'google/gemma-4-26b-a4b-it:free';
 const DEFAULT_FALLBACK_MODEL = 'google/gemma-4-31b-it:free';
-const DEFAULT_SECOND_FALLBACK_MODEL = 'google/gemma-4-26b-a4b-it:free';
 
 function json(statusCode, body){
   return {
@@ -55,15 +54,14 @@ exports.handler = async (event) => {
 
   const model = process.env.OPENROUTER_MODEL || DEFAULT_MODEL;
   const fallback = process.env.OPENROUTER_FALLBACK_MODEL || DEFAULT_FALLBACK_MODEL;
-  const secondFallback = process.env.OPENROUTER_SECOND_FALLBACK_MODEL || DEFAULT_SECOND_FALLBACK_MODEL;
 
   try{
     const b=JSON.parse(event.body||'{}');
     const prompt=cleanText(b.prompt,50000);
     const customSystem=cleanText(b.system,16000);
     const context=b.context||{};
-    const files=Array.isArray(b.files)?b.files.slice(0,6):[];
-    const images=Array.isArray(b.images)?b.images.slice(0,8):[];
+    const files=Array.isArray(b.files)?b.files.slice(0,4):[];
+    const images=Array.isArray(b.images)?b.images.slice(0,6):[];
     const incomingMessages=Array.isArray(b.messages)?b.messages.slice(-12):[];
     if(!prompt && !files.length && !images.length && !incomingMessages.length) return json(400,{error:'Aucun contenu à analyser.'});
 
@@ -83,14 +81,17 @@ exports.handler = async (event) => {
     for(const f of files){
       if(!f) continue;
       const name=cleanText(f.name,200);
-      const text=cleanText(f.text,30000);
+      const text=cleanText(f.text,12000);
       if(text) content.push({type:'text',text:`\n--- DOCUMENT : ${name} ---\n${text}\n--- FIN DOCUMENT ---`});
     }
     for(const im of images){
       if(!im?.data) continue;
       const mime=String(im.type||'image/jpeg');
       if(!mime.startsWith('image/')) continue;
-      content.push({type:'image_url',image_url:{url:`data:${mime};base64,${im.data}`}});
+      const data=String(im.data||'');
+      if(!data) continue;
+      if(data.length>1900000) return json(413,{error:'Une photo est encore trop lourde après compression. Choisis moins de photos ou une photo plus légère.',stage:'input'});
+      content.push({type:'image_url',image_url:{url:`data:${mime};base64,${data}`}});
     }
 
     let messages;
@@ -118,11 +119,14 @@ exports.handler = async (event) => {
     }
 
     const body={
-      models:[model, fallback, secondFallback].filter((m,i,a)=>m && a.indexOf(m)===i),
+      models:[model, fallback].filter((m,i,a)=>m && a.indexOf(m)===i),
       messages:[{role:'system',content:systemText},...messages],
       temperature:0.15,
-      max_tokens:Math.min(Math.max(Number(b.maxTokens)||5000,500),6000)
+      max_tokens:Math.min(Math.max(Number(b.maxTokens)||2800,500),3500)
     };
+    // Do not force response_format=json_object: several free multimodal
+    // models reject that parameter even when they can return valid JSON.
+    // The client already has a tolerant safeParseJSON() fallback.
 
     let result=await callOpenRouter({key,body});
     let data=result.data;
@@ -131,16 +135,14 @@ exports.handler = async (event) => {
     // If the router still returns an error, make one explicit second attempt on
     // the known-good free multimodal backup. This protects us from a provider
     // returning an error before OpenRouter's model fallback can be applied.
-    const explicitFallbacks=[fallback, secondFallback].filter((m,i,a)=>m && m!==model && a.indexOf(m)===i);
-    for(const backupModel of explicitFallbacks){
-      if(r.ok) break;
-      const backupBody={...body, model:backupModel, models:[backupModel]};
+    if(!r.ok && fallback && fallback !== model){
+      const backupBody={...body, model:fallback, models:[fallback]};
       result=await callOpenRouter({key,body:backupBody});
       data=result.data;
       r=result.response;
       if(r.ok){
         const answer=data?.choices?.[0]?.message?.content;
-        if(answer) return json(200,{text:answer,model:data?.model||backupModel,fallbackUsed:true});
+        if(answer) return json(200,{text:answer,model:data?.model||fallback,fallbackUsed:true});
       }
     }
 
@@ -151,8 +153,7 @@ exports.handler = async (event) => {
         httpStatus:r.status,
         model,
         fallbackModel:fallback,
-        secondFallbackModel:secondFallback,
-        fallbackTried:true,
+        fallbackTried:!!(fallback && fallback !== model),
         requestId:data?.id || null
       });
     }
