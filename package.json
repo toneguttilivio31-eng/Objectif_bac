@@ -1,0 +1,10 @@
+{
+  "name": "objectif-bac",
+  "private": true,
+  "version": "2.2.0",
+  "dependencies": {
+    "pdfjs-dist": "^5.4.149",
+    "mammoth": "^1.9.1",
+    "@netlify/blobs": "^10.4.0"
+  }
+}
